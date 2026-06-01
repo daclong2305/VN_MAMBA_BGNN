@@ -22,6 +22,7 @@ dist/
 *_log*/
 *mamba2_log*/
 vn30_stock_graph_results*/
+vn30_turnover_smoke*/
 comprehensive_results/
 *.pth
 *.pt

@@ -42,6 +42,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--transaction-cost", type=float, default=0.0015)
+    parser.add_argument(
+        "--rebalance-every",
+        type=int,
+        default=1,
+        help="Rebalance every N test days. 1 reproduces the original daily top-k backtest.",
+    )
+    parser.add_argument(
+        "--hold-k",
+        type=int,
+        default=0,
+        help="Keep existing names while they remain in the top hold-k ranks. 0 disables the hold buffer.",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Only open new positions whose predicted return is at least this value.",
+    )
+    parser.add_argument(
+        "--turnover-sweep",
+        action="store_true",
+        help="Also evaluate common lower-turnover portfolio rules without retraining models.",
+    )
     return parser.parse_args()
 
 
@@ -168,26 +191,73 @@ def backtest_topk(
     tickers: list[str],
     top_k: int = 5,
     transaction_cost: float = 0.0015,
+    rebalance_every: int = 1,
+    hold_k: int | None = None,
+    min_score: float | None = None,
 ) -> tuple[dict[str, float], pd.DataFrame]:
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    if rebalance_every <= 0:
+        raise ValueError("rebalance_every must be positive")
+    if hold_k is not None and hold_k < top_k:
+        raise ValueError("hold_k must be >= top_k when provided")
+
     pred_np = pred.detach().cpu().numpy()
     ret_np = true_returns.detach().cpu().numpy()
     prev_weights = np.zeros(pred_np.shape[1], dtype=np.float32)
+    current_holdings: list[int] = []
     rows = []
     portfolio_returns = []
 
     for i, date in enumerate(dates):
-        chosen = np.argsort(pred_np[i])[-top_k:]
+        should_rebalance = i == 0 or (i % rebalance_every == 0)
+        if should_rebalance:
+            order = np.argsort(pred_np[i])[::-1]
+            rank = {stock_idx: rank_idx + 1 for rank_idx, stock_idx in enumerate(order)}
+
+            kept = []
+            if hold_k is not None:
+                kept = [
+                    stock_idx
+                    for stock_idx in current_holdings
+                    if rank.get(stock_idx, len(order) + 1) <= hold_k
+                    and (min_score is None or pred_np[i, stock_idx] >= min_score)
+                ]
+
+            chosen = list(kept)
+            for stock_idx in order:
+                if len(chosen) >= top_k:
+                    break
+                if stock_idx in chosen:
+                    continue
+                if min_score is not None and pred_np[i, stock_idx] < min_score:
+                    continue
+                chosen.append(int(stock_idx))
+
+            if len(chosen) < top_k:
+                for stock_idx in order:
+                    if len(chosen) >= top_k:
+                        break
+                    if stock_idx not in chosen:
+                        chosen.append(int(stock_idx))
+            current_holdings = chosen[:top_k]
+        else:
+            chosen = current_holdings
+
         weights = np.zeros(pred_np.shape[1], dtype=np.float32)
         weights[chosen] = 1.0 / top_k
         gross = float(np.sum(weights * ret_np[i]))
         turnover = float(np.sum(np.abs(weights - prev_weights)))
-        net = gross - transaction_cost * turnover
+        trading_cost = transaction_cost * turnover
+        net = gross - trading_cost
         portfolio_returns.append(net)
         rows.append(
             {
                 "Date": date,
+                "is_rebalance_day": should_rebalance,
                 "gross_return": gross,
                 "turnover": turnover,
+                "trading_cost": trading_cost,
                 "net_return": net,
                 "selected_tickers": ",".join(tickers[j] for j in chosen),
             }
@@ -201,13 +271,29 @@ def backtest_topk(
     sharpe = 0.0 if rets.std() == 0 else float(rets.mean() / rets.std() * np.sqrt(252))
     metrics = {
         "top_k": top_k,
+        "rebalance_every": rebalance_every,
+        "hold_k": 0 if hold_k is None else hold_k,
+        "min_score": "" if min_score is None else min_score,
         "total_net_return": float(cumulative[-1] - 1.0),
         "annualized_sharpe": sharpe,
         "max_drawdown": float(drawdown.min()),
         "mean_daily_net_return": float(rets.mean()),
         "average_turnover": float(np.mean([r["turnover"] for r in rows])),
+        "total_trading_cost": float(np.sum([r["trading_cost"] for r in rows])),
+        "positive_day_ratio": float(np.mean([r["net_return"] > 0 for r in rows])),
     }
     return metrics, pd.DataFrame(rows)
+
+
+def turnover_sweep_variants(top_k: int) -> list[dict]:
+    hold_2x = max(top_k * 2, top_k)
+    return [
+        {"variant": "daily_topk", "rebalance_every": 1, "hold_k": None, "min_score": None},
+        {"variant": "weekly_topk", "rebalance_every": 5, "hold_k": None, "min_score": None},
+        {"variant": "daily_hold_buffer", "rebalance_every": 1, "hold_k": hold_2x, "min_score": None},
+        {"variant": "weekly_hold_buffer", "rebalance_every": 5, "hold_k": hold_2x, "min_score": None},
+        {"variant": "weekly_positive_only", "rebalance_every": 5, "hold_k": hold_2x, "min_score": 0.0},
+    ]
 
 
 def save_predictions(
@@ -270,6 +356,7 @@ def main() -> None:
 
     all_results = []
     backtest_results = []
+    turnover_sweep_results = []
     adjacency_df = pd.DataFrame(static_adj.numpy(), index=data.tickers, columns=data.tickers)
     adjacency_df.to_csv(output_dir / "static_correlation_adjacency.csv")
 
@@ -295,17 +382,45 @@ def main() -> None:
             data.tickers,
             top_k=args.top_k,
             transaction_cost=args.transaction_cost,
+            rebalance_every=args.rebalance_every,
+            hold_k=None if args.hold_k == 0 else args.hold_k,
+            min_score=args.min_score,
         )
         row = {"model": model_name, "best_val_nll": best_val, **metrics, **bt_metrics}
         all_results.append(row)
         backtest_results.append({"model": model_name, **bt_metrics})
-        bt_df.to_csv(output_dir / f"{model_name}_backtest_top{args.top_k}.csv", index=False)
+        bt_suffix = f"top{args.top_k}_reb{args.rebalance_every}_hold{args.hold_k}"
+        bt_df.to_csv(output_dir / f"{model_name}_backtest_{bt_suffix}.csv", index=False)
+
+        if args.turnover_sweep:
+            for variant in turnover_sweep_variants(args.top_k):
+                sweep_metrics, sweep_df = backtest_topk(
+                    pred,
+                    true,
+                    data.test_dates,
+                    data.tickers,
+                    top_k=args.top_k,
+                    transaction_cost=args.transaction_cost,
+                    rebalance_every=variant["rebalance_every"],
+                    hold_k=variant["hold_k"],
+                    min_score=variant["min_score"],
+                )
+                turnover_sweep_results.append(
+                    {"model": model_name, "variant": variant["variant"], **sweep_metrics}
+                )
+                sweep_df.to_csv(
+                    output_dir / f"{model_name}_backtest_{variant['variant']}_top{args.top_k}.csv",
+                    index=False,
+                )
         save_predictions(output_dir, model_name, pred, log_var, true, data.test_dates, data.tickers)
         print(json.dumps(row, indent=2))
 
     results_df = pd.DataFrame(all_results).sort_values("rank_ic_by_day", ascending=False)
     results_df.to_csv(output_dir / "vn30_model_comparison.csv", index=False)
     pd.DataFrame(backtest_results).to_csv(output_dir / "vn30_backtest_summary.csv", index=False)
+    if turnover_sweep_results:
+        turnover_sweep_df = pd.DataFrame(turnover_sweep_results)
+        turnover_sweep_df.to_csv(output_dir / "vn30_turnover_sweep.csv", index=False)
 
     experiment_config = {
         "args": vars(args),
