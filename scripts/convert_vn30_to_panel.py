@@ -36,7 +36,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-dir", default="Dataset/VN30")
     parser.add_argument("--output-dir", default="Dataset")
-    parser.add_argument("--benchmark", default="VN30")
+    parser.add_argument(
+        "--benchmark",
+        default="VN30",
+        help="Index ticker to exclude from stock nodes. Used as market source only when --market-source=benchmark.",
+    )
+    parser.add_argument(
+        "--market-source",
+        choices=["equal_weight", "benchmark"],
+        default="equal_weight",
+        help="Build market features from the equal-weight stock universe or from the benchmark index.",
+    )
     parser.add_argument("--min-date", default=None)
     parser.add_argument("--max-date", default=None)
     parser.add_argument(
@@ -49,18 +59,48 @@ def parse_args() -> argparse.Namespace:
 
 def read_symbol_file(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    expected = {"Symbol", "TradingDate", "Open", "High", "Low", "Close", "Volume", "Value"}
-    missing = expected.difference(df.columns)
-    if missing:
-        raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+    column_map = {col.lower(): col for col in df.columns}
 
-    out = df.rename(columns={"Symbol": "Ticker", "TradingDate": "Date"}).copy()
-    out["Date"] = pd.to_datetime(out["Date"], dayfirst=True, errors="coerce")
+    dayfirst = False
+    if {"symbol", "tradingdate", "open", "high", "low", "close", "volume"}.issubset(column_map):
+        rename_map = {
+            column_map["symbol"]: "Ticker",
+            column_map["tradingdate"]: "Date",
+            column_map["open"]: "Open",
+            column_map["high"]: "High",
+            column_map["low"]: "Low",
+            column_map["close"]: "Close",
+            column_map["volume"]: "Volume",
+        }
+        if "value" in column_map:
+            rename_map[column_map["value"]] = "Value"
+        out = df.rename(columns=rename_map).copy()
+        dayfirst = True
+    elif {"date", "open", "high", "low", "close", "volume"}.issubset(column_map):
+        rename_map = {
+            column_map["date"]: "Date",
+            column_map["open"]: "Open",
+            column_map["high"]: "High",
+            column_map["low"]: "Low",
+            column_map["close"]: "Close",
+            column_map["volume"]: "Volume",
+        }
+        out = df.rename(columns=rename_map).copy()
+        out["Ticker"] = path.stem.upper()
+    else:
+        required = ["date/open/high/low/close/volume", "or Symbol/TradingDate/Open/High/Low/Close/Volume"]
+        raise ValueError(f"{path} does not match a supported VN30 CSV schema: {required}")
+
+    out["Date"] = pd.to_datetime(out["Date"], dayfirst=dayfirst, errors="coerce")
     out["Ticker"] = out["Ticker"].fillna(path.stem).astype(str).str.upper()
 
-    numeric_cols = ["Open", "High", "Low", "Close", "Volume", "Value"]
+    numeric_cols = ["Open", "High", "Low", "Close", "Volume"]
     for col in numeric_cols:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "Value" in out.columns:
+        out["Value"] = pd.to_numeric(out["Value"], errors="coerce")
+    else:
+        out["Value"] = out["Close"] * out["Volume"]
 
     out = out[RAW_COLUMNS]
     out = out.dropna(subset=["Date", "Ticker", "Close"])
@@ -102,7 +142,7 @@ def add_stock_features(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-def build_market_features(raw_panel: pd.DataFrame, benchmark: str) -> pd.DataFrame:
+def build_benchmark_market_features(raw_panel: pd.DataFrame, benchmark: str) -> pd.DataFrame:
     market = raw_panel[raw_panel["Ticker"] == benchmark].sort_values("Date").copy()
     if market.empty:
         raise ValueError(f"Benchmark ticker {benchmark!r} was not found.")
@@ -115,12 +155,27 @@ def build_market_features(raw_panel: pd.DataFrame, benchmark: str) -> pd.DataFra
     return market[["Date", "market_close", "market_ret_1d", "market_ret_5d", "market_vol_20"]]
 
 
+def build_equal_weight_market_features(feature_panel: pd.DataFrame) -> pd.DataFrame:
+    market = (
+        feature_panel.groupby("Date", as_index=False)
+        .agg(
+            market_close=("Close", "mean"),
+            market_ret_1d=("ret_1d", "mean"),
+            market_ret_5d=("ret_5d", "mean"),
+        )
+        .sort_values("Date")
+    )
+    market["market_vol_20"] = market["market_ret_1d"].rolling(20, min_periods=20).std()
+    return market[["Date", "market_close", "market_ret_1d", "market_ret_5d", "market_vol_20"]]
+
+
 def write_metadata(
     raw_panel: pd.DataFrame,
     feature_panel: pd.DataFrame,
     balanced_feature_panel: pd.DataFrame,
     output_dir: Path,
     benchmark: str,
+    market_source: str,
     raw_path: Path,
     feature_path: Path,
     balanced_feature_path: Path,
@@ -137,6 +192,7 @@ def write_metadata(
     metadata = {
         "source_dir": "Dataset/VN30",
         "benchmark": benchmark,
+        "market_source": market_source,
         "raw_panel_path": str(raw_path.as_posix()),
         "feature_panel_path": str(feature_path.as_posix()),
         "balanced_feature_panel_path": str(balanced_feature_path.as_posix()),
@@ -154,7 +210,9 @@ def write_metadata(
             "Y": "(samples, num_stocks)",
         },
         "notes": [
-            "Rows with Ticker == VN30 are benchmark/index rows and are excluded from stock-node feature panel.",
+            f"Rows with Ticker == {benchmark} are benchmark/index rows and are excluded from stock-node feature panel when present.",
+            "Market features are computed from the equal-weight average of the stock-node universe when market_source == equal_weight.",
+            "Benchmark/index rows are used for market features only when market_source == benchmark.",
             "Rolling features use current and past observations only.",
             "target_return_1d is next trading day's log return per stock.",
             "Correlation graphs for experiments should be computed from train dates only.",
@@ -191,7 +249,10 @@ def main() -> None:
     benchmark = args.benchmark.upper()
     stock_panel = raw_panel[raw_panel["Ticker"] != benchmark].copy()
     feature_panel = add_stock_features(stock_panel)
-    market_features = build_market_features(raw_panel, benchmark)
+    if args.market_source == "benchmark":
+        market_features = build_benchmark_market_features(raw_panel, benchmark)
+    else:
+        market_features = build_equal_weight_market_features(feature_panel)
     feature_panel = feature_panel.merge(market_features, on="Date", how="left")
     feature_panel["relative_ret_1d"] = feature_panel["ret_1d"] - feature_panel["market_ret_1d"]
 
@@ -217,6 +278,7 @@ def main() -> None:
         balanced_feature_panel,
         output_dir,
         benchmark,
+        args.market_source,
         raw_path,
         feature_path,
         balanced_feature_path,

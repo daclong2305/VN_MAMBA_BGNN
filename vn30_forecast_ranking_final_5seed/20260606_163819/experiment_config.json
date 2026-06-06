@@ -1,0 +1,147 @@
+{
+  "args": {
+    "panel_path": "Dataset/vn30_panel_features_balanced.csv",
+    "metadata_path": "Dataset/vn30_panel_metadata.json",
+    "output_dir": "vn30_forecast_ranking_final_5seed",
+    "lookback": 20,
+    "batch_size": 16,
+    "hidden_dim": 64,
+    "epochs": 60,
+    "patience": 10,
+    "lr": 0.001,
+    "weight_decay": 1e-05,
+    "rank_loss_weight": 0.05,
+    "rank_loss_temperature": 0.01,
+    "rank_loss_models": [
+      "stock_mamba_hybrid"
+    ],
+    "portfolio_loss_weight": 0.0,
+    "portfolio_loss_temperature": 0.02,
+    "portfolio_loss_models": [
+      "stock_mamba_hybrid"
+    ],
+    "topk_loss_weight": 0.0,
+    "topk_loss_temperature": 0.01,
+    "topk_loss_models": [
+      "stock_mamba_hybrid"
+    ],
+    "listwise_rank_loss_weight": 0.05,
+    "listwise_rank_loss_temperature": 0.01,
+    "listwise_rank_loss_models": [
+      "stock_mamba_hybrid"
+    ],
+    "checkpoint_metric": "forecast_rank",
+    "seed": 123,
+    "quick": false,
+    "models": [
+      "stock_mamba_hybrid",
+      "transformer",
+      "lstm",
+      "original_mamba_bgnn_full"
+    ],
+    "graph_correlation": "positive",
+    "top_k": 5,
+    "transaction_cost": 0.0015,
+    "score_mode": "mu",
+    "risk_aversion": 0.25,
+    "rebalance_every": 1,
+    "hold_k": 0,
+    "min_score": null,
+    "turnover_sweep": false
+  },
+  "tickers": [
+    "ACB",
+    "BID",
+    "BVH",
+    "CTG",
+    "FPT",
+    "GAS",
+    "GVR",
+    "HDB",
+    "HPG",
+    "KDH",
+    "MBB",
+    "MSN",
+    "MWG",
+    "NVL",
+    "PDR",
+    "PLX",
+    "PNJ",
+    "POW",
+    "SAB",
+    "SSI",
+    "STB",
+    "TCB",
+    "TPB",
+    "VCB",
+    "VHM",
+    "VIC",
+    "VJC",
+    "VNM",
+    "VPB",
+    "VRE"
+  ],
+  "feature_columns": [
+    "ret_1d",
+    "ret_5d",
+    "ret_20d",
+    "oc_return",
+    "hl_range",
+    "volume_change_1d",
+    "value_change_1d",
+    "rolling_vol_5",
+    "rolling_vol_20",
+    "ma_ratio_5",
+    "ma_ratio_20",
+    "volume_ma_ratio_5",
+    "volume_ma_ratio_20",
+    "market_ret_1d",
+    "market_ret_5d",
+    "market_vol_20",
+    "relative_ret_1d"
+  ],
+  "train_period": [
+    "2018-07-27",
+    "2023-11-06"
+  ],
+  "val_period": [
+    "2023-11-07",
+    "2024-12-16"
+  ],
+  "test_period": [
+    "2024-12-17",
+    "2026-01-30"
+  ],
+  "tensor_shapes": {
+    "x_train": [
+      1301,
+      20,
+      30,
+      17
+    ],
+    "y_train": [
+      1301,
+      30
+    ],
+    "x_val": [
+      278,
+      20,
+      30,
+      17
+    ],
+    "y_val": [
+      278,
+      30
+    ],
+    "x_test": [
+      280,
+      20,
+      30,
+      17
+    ],
+    "y_test": [
+      280,
+      30
+    ]
+  }
+}

@@ -139,6 +139,14 @@ if __name__ == "__main__":
     main('IXIC')  # or 'DJI', 'NYSE'
 ```
 
+## VN30 Stock Forecasting and Ranking Pipeline
+
+The VN30 panel forecasting and stock-ranking experiment is documented separately:
+
+- [README_VN30_FORECAST_RANKING.md](README_VN30_FORECAST_RANKING.md)
+
+That file covers the updated VN30 code path, model variants, metrics, 5-seed evaluation command, and final results.
+
 ## Output Structure
 
 Each run creates a timestamped directory containing:

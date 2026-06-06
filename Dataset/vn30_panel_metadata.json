@@ -1,16 +1,16 @@
 {
   "source_dir": "Dataset/VN30",
-  "benchmark": "VN30",
+  "benchmark": "VNINDEX",
+  "market_source": "equal_weight",
   "raw_panel_path": "Dataset/vn30_panel_raw.csv",
   "feature_panel_path": "Dataset/vn30_panel_features.csv",
   "balanced_feature_panel_path": "Dataset/vn30_panel_features_balanced.csv",
-  "raw_rows": 63955,
-  "feature_rows": 59593,
-  "balanced_feature_rows": 30030,
+  "raw_rows": 79969,
+  "feature_rows": 76445,
+  "balanced_feature_rows": 56340,
   "num_stock_tickers": 30,
   "stock_tickers": [
     "ACB",
-    "BCM",
     "BID",
     "BVH",
     "CTG",
@@ -19,12 +19,14 @@
     "GVR",
     "HDB",
     "HPG",
+    "KDH",
     "MBB",
     "MSN",
     "MWG",
     "NVL",
     "PDR",
     "PLX",
+    "PNJ",
     "POW",
     "SAB",
     "SSI",
@@ -33,15 +35,14 @@
     "TPB",
     "VCB",
     "VHM",
-    "VIB",
     "VIC",
     "VJC",
     "VNM",
     "VPB",
     "VRE"
   ],
-  "date_start": "2013-01-02",
-  "date_end": "2023-06-30",
+  "date_start": "2014-03-04",
+  "date_end": "2026-02-02",
   "feature_columns": [
     "ret_1d",
     "ret_5d",
@@ -70,7 +71,9 @@
     "Y": "(samples, num_stocks)"
   },
   "notes": [
-    "Rows with Ticker == VN30 are benchmark/index rows and are excluded from stock-node feature panel.",
+    "Rows with Ticker == VNINDEX are benchmark/index rows and are excluded from stock-node feature panel when present.",
+    "Market features are computed from the equal-weight average of the stock-node universe when market_source == equal_weight.",
+    "Benchmark/index rows are used for market features only when market_source == benchmark.",
     "Rolling features use current and past observations only.",
     "target_return_1d is next trading day's log return per stock.",
     "Correlation graphs for experiments should be computed from train dates only.",
@@ -80,183 +83,183 @@
   "per_ticker_coverage": [
     {
       "Ticker": "ACB",
-      "rows": 2619,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
-    },
-    {
-      "Ticker": "BCM",
-      "rows": 1341,
-      "start": "2018-02-21",
-      "end": "2023-06-30"
+      "rows": 2896,
+      "start": "2014-06-27",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "BID",
-      "rows": 2353,
-      "start": "2014-01-23",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "BVH",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "CTG",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "FPT",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "GAS",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "GVR",
-      "rows": 1320,
+      "rows": 1963,
       "start": "2018-03-21",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "HDB",
-      "rows": 1369,
+      "rows": 2015,
       "start": "2018-01-05",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "HPG",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
+    },
+    {
+      "Ticker": "KDH",
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "MBB",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "MSN",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "MWG",
-      "rows": 2242,
+      "rows": 2888,
       "start": "2014-07-14",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "NVL",
-      "rows": 1625,
+      "rows": 2271,
       "start": "2016-12-28",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "PDR",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "PLX",
-      "rows": 1550,
+      "rows": 2196,
       "start": "2017-04-21",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
+    },
+    {
+      "Ticker": "PNJ",
+      "rows": 2885,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "POW",
-      "rows": 1322,
+      "rows": 1971,
       "start": "2018-03-06",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "SAB",
-      "rows": 1641,
+      "rows": 2287,
       "start": "2016-12-06",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "SSI",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "STB",
-      "rows": 2618,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "TCB",
-      "rows": 1271,
+      "rows": 1919,
       "start": "2018-06-04",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "TPB",
-      "rows": 1298,
+      "rows": 1948,
       "start": "2018-04-19",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VCB",
-      "rows": 2616,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VHM",
-      "rows": 1281,
-      "start": "2018-05-17",
-      "end": "2023-06-30"
-    },
-    {
-      "Ticker": "VIB",
-      "rows": 1616,
-      "start": "2017-01-09",
-      "end": "2023-06-30"
+      "rows": 2024,
+      "start": "2014-03-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VIC",
-      "rows": 2616,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VJC",
-      "rows": 1585,
+      "rows": 2233,
       "start": "2017-02-28",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VNM",
-      "rows": 2616,
-      "start": "2013-01-02",
-      "end": "2023-06-30"
+      "rows": 2894,
+      "start": "2014-07-04",
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VPB",
-      "rows": 1467,
+      "rows": 2114,
       "start": "2017-08-17",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     },
     {
       "Ticker": "VRE",
-      "rows": 1411,
+      "rows": 2055,
       "start": "2017-11-06",
-      "end": "2023-06-30"
+      "end": "2026-02-02"
     }
   ]
 }

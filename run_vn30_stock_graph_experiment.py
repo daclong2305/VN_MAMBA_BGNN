@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from stock_node_models import StockGraphModelConfig, create_model
 from vn30_stock_graph_dataset import build_correlation_graph, build_vn30_panel_loaders
@@ -18,6 +19,7 @@ DEFAULT_MODELS = [
     "lstm",
     "transformer",
     "original_mamba_bgnn",
+    "original_mamba_bgnn_full",
     "stock_mamba_no_graph",
     "stock_mamba_static",
     "stock_mamba_adaptive",
@@ -37,11 +39,107 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument(
+        "--rank-loss-weight",
+        type=float,
+        default=0.05,
+        help="Weight for pairwise within-day ranking loss. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--rank-loss-temperature",
+        type=float,
+        default=0.01,
+        help="Temperature for pairwise ranking logits; smaller values emphasize rank gaps.",
+    )
+    parser.add_argument(
+        "--rank-loss-models",
+        nargs="+",
+        default=["stock_mamba_hybrid"],
+        help="Model names that receive the ranking loss term.",
+    )
+    parser.add_argument(
+        "--portfolio-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for soft top-k excess-return portfolio loss. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--portfolio-loss-temperature",
+        type=float,
+        default=0.02,
+        help="Softmax temperature for differentiable portfolio weights.",
+    )
+    parser.add_argument(
+        "--portfolio-loss-models",
+        nargs="+",
+        default=["stock_mamba_hybrid"],
+        help="Model names that receive the soft portfolio loss term.",
+    )
+    parser.add_argument(
+        "--topk-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for differentiable top-k Sharpe/return loss. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--topk-loss-temperature",
+        type=float,
+        default=0.01,
+        help="Temperature for differentiable top-k portfolio weights.",
+    )
+    parser.add_argument(
+        "--topk-loss-models",
+        nargs="+",
+        default=["stock_mamba_hybrid"],
+        help="Model names that receive the differentiable top-k portfolio loss.",
+    )
+    parser.add_argument(
+        "--listwise-rank-loss-weight",
+        type=float,
+        default=0.05,
+        help="Weight for listwise cross-sectional ranking loss. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--listwise-rank-loss-temperature",
+        type=float,
+        default=0.01,
+        help="Temperature for listwise ranking target and prediction distributions.",
+    )
+    parser.add_argument(
+        "--listwise-rank-loss-models",
+        nargs="+",
+        default=["stock_mamba_hybrid"],
+        help="Model names that receive the listwise ranking loss term.",
+    )
+    parser.add_argument(
+        "--checkpoint-metric",
+        choices=["loss", "forecast_rank", "val_sharpe", "val_return", "rank_ic"],
+        default="forecast_rank",
+        help="Validation criterion used for early-stopping checkpoint selection.",
+    )
     parser.add_argument("--seed", type=int, default=26)
     parser.add_argument("--quick", action="store_true", help="Run a fast smoke experiment.")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
+    parser.add_argument(
+        "--graph-correlation",
+        choices=["positive", "absolute"],
+        default="positive",
+        help="Static graph construction from train returns. positive ignores negative correlations.",
+    )
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--transaction-cost", type=float, default=0.0015)
+    parser.add_argument(
+        "--score-mode",
+        choices=["mu", "risk_adjusted", "positive_confidence", "rank_zscore"],
+        default="mu",
+        help="Prediction score used for portfolio selection.",
+    )
+    parser.add_argument(
+        "--risk-aversion",
+        type=float,
+        default=0.25,
+        help="Penalty applied to sigma when score-mode uses uncertainty.",
+    )
     parser.add_argument(
         "--rebalance-every",
         type=int,
@@ -79,6 +177,66 @@ def gaussian_nll(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor) -> to
     return nn.functional.gaussian_nll_loss(mu, y, log_var.exp().clamp_min(1e-8), full=True, reduction="mean")
 
 
+def pairwise_rank_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0.01) -> torch.Tensor:
+    pred_diff = (mu.unsqueeze(2) - mu.unsqueeze(1)) / max(temperature, 1e-8)
+    true_diff = y.unsqueeze(2) - y.unsqueeze(1)
+    target = torch.sign(true_diff)
+    mask = target != 0
+    if not torch.any(mask):
+        return mu.new_tensor(0.0)
+    return F.softplus(-target[mask] * pred_diff[mask]).mean()
+
+
+def listwise_rank_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0.01) -> torch.Tensor:
+    pred_logits = (mu - mu.mean(dim=1, keepdim=True)) / max(temperature, 1e-8)
+    target_logits = (y - y.mean(dim=1, keepdim=True)) / max(temperature, 1e-8)
+    target_probs = F.softmax(target_logits, dim=1)
+    pred_log_probs = F.log_softmax(pred_logits, dim=1)
+    return -(target_probs * pred_log_probs).sum(dim=1).mean()
+
+
+def soft_portfolio_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0.02) -> torch.Tensor:
+    scores = mu - mu.mean(dim=1, keepdim=True)
+    weights = F.softmax(scores / max(temperature, 1e-8), dim=1)
+    excess_returns = y - y.mean(dim=1, keepdim=True)
+    return -(weights * excess_returns).sum(dim=1).mean()
+
+
+def soft_topk_weights(scores: torch.Tensor, top_k: int, temperature: float = 0.01) -> torch.Tensor:
+    """Differentiable equal-weight approximation of repeated top-k selection."""
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    k = min(top_k, scores.shape[1])
+    logits = (scores - scores.mean(dim=1, keepdim=True)) / max(temperature, 1e-8)
+    remaining = torch.ones_like(logits)
+    selected = torch.zeros_like(logits)
+    for _ in range(k):
+        step_logits = logits + remaining.clamp_min(1e-6).log()
+        probs = F.softmax(step_logits, dim=1)
+        selected = selected + probs
+        remaining = remaining * (1.0 - probs).clamp_min(1e-6)
+    weights = selected / float(k)
+    return weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+
+def soft_topk_portfolio_loss(
+    mu: torch.Tensor,
+    y: torch.Tensor,
+    top_k: int,
+    temperature: float = 0.01,
+    sharpe_weight: float = 0.25,
+    downside_weight: float = 0.25,
+) -> torch.Tensor:
+    weights = soft_topk_weights(mu, top_k=top_k, temperature=temperature)
+    portfolio_returns = (weights * y).sum(dim=1)
+    benchmark_returns = y.mean(dim=1)
+    excess_returns = portfolio_returns - benchmark_returns
+    mean_excess = excess_returns.mean()
+    sharpe = mean_excess / excess_returns.std(unbiased=False).clamp_min(1e-4)
+    downside = F.relu(-excess_returns).mean()
+    return -mean_excess - sharpe_weight * sharpe + downside_weight * downside
+
+
 def direction_accuracy(mu: torch.Tensor, y: torch.Tensor) -> float:
     mask = y != 0
     if mask.sum() == 0:
@@ -101,7 +259,42 @@ def rank_ic_by_day(mu: torch.Tensor, y: torch.Tensor) -> float:
     return float(np.mean(vals)) if vals else 0.0
 
 
-def compute_metrics(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
+def topk_ranking_metrics(mu: torch.Tensor, y: torch.Tensor, top_k: int = 5) -> dict[str, float]:
+    if top_k <= 0:
+        raise ValueError("top_k must be positive")
+    k = min(top_k, mu.shape[1])
+    overlaps = []
+    hit_rates = []
+    top_returns = []
+    bottom_returns = []
+    oracle_top_returns = []
+    for pred_day, true_day in zip(mu, y):
+        pred_order = torch.argsort(pred_day, descending=True)
+        true_order = torch.argsort(true_day, descending=True)
+        pred_top = pred_order[:k]
+        pred_bottom = pred_order[-k:]
+        true_top = set(true_order[:k].tolist())
+        overlap = sum(1 for idx in pred_top.tolist() if idx in true_top)
+        overlaps.append(overlap / float(k))
+        hit_rates.append(float(overlap > 0))
+        top_returns.append(true_day[pred_top].mean().item())
+        bottom_returns.append(true_day[pred_bottom].mean().item())
+        oracle_top_returns.append(true_day[true_order[:k]].mean().item())
+    top_return = float(np.mean(top_returns)) if top_returns else 0.0
+    bottom_return = float(np.mean(bottom_returns)) if bottom_returns else 0.0
+    oracle_top_return = float(np.mean(oracle_top_returns)) if oracle_top_returns else 0.0
+    return {
+        "topk_overlap": float(np.mean(overlaps)) if overlaps else 0.0,
+        "topk_hit_rate": float(np.mean(hit_rates)) if hit_rates else 0.0,
+        "pred_topk_mean_return": top_return,
+        "pred_bottomk_mean_return": bottom_return,
+        "top_bottom_return_spread": top_return - bottom_return,
+        "oracle_topk_mean_return": oracle_top_return,
+        "topk_return_capture": 0.0 if abs(oracle_top_return) < 1e-12 else top_return / oracle_top_return,
+    }
+
+
+def compute_metrics(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor, top_k: int = 5) -> dict[str, float]:
     mu = mu.detach().cpu()
     y = y.detach().cpu()
     log_var = log_var.detach().cpu()
@@ -111,7 +304,7 @@ def compute_metrics(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor) ->
     mae = torch.mean(torch.abs(flat_mu - flat_y)).item()
     corr = torch.corrcoef(torch.stack([flat_mu, flat_y]))[0, 1].item() if flat_mu.numel() > 1 else 0.0
     nll = gaussian_nll(mu, log_var, y).item()
-    return {
+    metrics = {
         "rmse": rmse,
         "mae": mae,
         "ic": 0.0 if np.isnan(corr) else corr,
@@ -119,6 +312,29 @@ def compute_metrics(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor) ->
         "directional_accuracy": direction_accuracy(mu, y),
         "nll": nll,
     }
+    metrics.update(topk_ranking_metrics(mu, y, top_k=top_k))
+    return metrics
+
+
+def score_predictions(
+    pred: torch.Tensor,
+    log_var: torch.Tensor | None = None,
+    score_mode: str = "mu",
+    risk_aversion: float = 0.25,
+) -> torch.Tensor:
+    if score_mode == "mu":
+        return pred
+    if score_mode == "rank_zscore":
+        centered = pred - pred.mean(dim=1, keepdim=True)
+        return centered / pred.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-6)
+    if log_var is None:
+        raise ValueError(f"score_mode={score_mode} requires log_var")
+    sigma = torch.exp(0.5 * log_var).clamp_min(1e-8)
+    if score_mode == "risk_adjusted":
+        return pred - risk_aversion * sigma
+    if score_mode == "positive_confidence":
+        return pred / sigma
+    raise ValueError(f"Unknown score_mode: {score_mode}")
 
 
 def collect_predictions(model: nn.Module, loader, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -135,6 +351,76 @@ def collect_predictions(model: nn.Module, loader, device: torch.device) -> tuple
     return torch.cat(preds, dim=0), torch.cat(logvars, dim=0), torch.cat(trues, dim=0)
 
 
+def validation_portfolio_metrics(
+    pred: torch.Tensor,
+    log_var: torch.Tensor,
+    true_returns: torch.Tensor,
+    top_k: int,
+    transaction_cost: float,
+    rebalance_every: int,
+    hold_k: int | None,
+    min_score: float | None,
+    score_mode: str,
+    risk_aversion: float,
+) -> dict[str, float]:
+    scores = score_predictions(pred, log_var, score_mode=score_mode, risk_aversion=risk_aversion)
+    dummy_dates = [str(i) for i in range(scores.shape[0])]
+    dummy_tickers = [str(i) for i in range(scores.shape[1])]
+    metrics, _ = backtest_topk(
+        scores,
+        true_returns,
+        dummy_dates,
+        dummy_tickers,
+        top_k=top_k,
+        transaction_cost=transaction_cost,
+        rebalance_every=rebalance_every,
+        hold_k=hold_k,
+        min_score=min_score,
+    )
+    return metrics
+
+
+def checkpoint_score(
+    checkpoint_metric: str,
+    val_loss: torch.Tensor,
+    val_mu: torch.Tensor,
+    val_log_var: torch.Tensor,
+    val_y: torch.Tensor,
+    top_k: int,
+    transaction_cost: float,
+    rebalance_every: int,
+    hold_k: int | None,
+    min_score: float | None,
+    score_mode: str,
+    risk_aversion: float,
+) -> tuple[float, dict[str, float]]:
+    val_metrics = compute_metrics(val_mu, val_log_var, val_y, top_k=top_k)
+    val_bt = validation_portfolio_metrics(
+        val_mu,
+        val_log_var,
+        val_y,
+        top_k=top_k,
+        transaction_cost=transaction_cost,
+        rebalance_every=rebalance_every,
+        hold_k=hold_k,
+        min_score=min_score,
+        score_mode=score_mode,
+        risk_aversion=risk_aversion,
+    )
+    if checkpoint_metric == "loss":
+        return -float(val_loss.item()), val_bt
+    if checkpoint_metric == "forecast_rank":
+        score = -float(val_metrics["nll"]) + 0.25 * float(val_metrics["rank_ic_by_day"])
+        return score, {**val_bt, **val_metrics}
+    if checkpoint_metric == "val_sharpe":
+        return float(val_bt["annualized_sharpe"]), val_bt
+    if checkpoint_metric == "val_return":
+        return float(val_bt["total_net_return"]), val_bt
+    if checkpoint_metric == "rank_ic":
+        return rank_ic_by_day(val_mu, val_y), val_bt
+    raise ValueError(f"Unknown checkpoint_metric: {checkpoint_metric}")
+
+
 def train_model(
     model: nn.Module,
     train_loader,
@@ -144,11 +430,28 @@ def train_model(
     patience: int,
     lr: float,
     weight_decay: float,
+    rank_loss_weight: float = 0.0,
+    rank_loss_temperature: float = 0.01,
+    listwise_rank_loss_weight: float = 0.0,
+    listwise_rank_loss_temperature: float = 0.01,
+    portfolio_loss_weight: float = 0.0,
+    portfolio_loss_temperature: float = 0.02,
+    topk_loss_weight: float = 0.0,
+    topk_loss_temperature: float = 0.01,
+    top_k: int = 5,
+    transaction_cost: float = 0.0015,
+    rebalance_every: int = 1,
+    hold_k: int | None = None,
+    min_score: float | None = None,
+    score_mode: str = "mu",
+    risk_aversion: float = 0.25,
+    checkpoint_metric: str = "loss",
 ) -> tuple[nn.Module, float]:
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     best_state = None
-    best_val = float("inf")
+    best_score = -float("inf")
+    best_val_nll = float("inf")
     stale = 0
 
     for epoch in range(1, epochs + 1):
@@ -159,18 +462,87 @@ def train_model(
             y = y.to(device)
             optimizer.zero_grad()
             mu, log_var = model(x)
-            loss = gaussian_nll(mu, log_var, y)
+            nll = gaussian_nll(mu, log_var, y)
+            rank_loss = pairwise_rank_loss(mu, y, rank_loss_temperature) if rank_loss_weight > 0 else mu.new_tensor(0.0)
+            listwise_loss = (
+                listwise_rank_loss(mu, y, listwise_rank_loss_temperature)
+                if listwise_rank_loss_weight > 0
+                else mu.new_tensor(0.0)
+            )
+            portfolio_loss = (
+                soft_portfolio_loss(mu, y, portfolio_loss_temperature)
+                if portfolio_loss_weight > 0
+                else mu.new_tensor(0.0)
+            )
+            topk_loss = (
+                soft_topk_portfolio_loss(mu, y, top_k=top_k, temperature=topk_loss_temperature)
+                if topk_loss_weight > 0
+                else mu.new_tensor(0.0)
+            )
+            loss = (
+                nll
+                + rank_loss_weight * rank_loss
+                + listwise_rank_loss_weight * listwise_loss
+                + portfolio_loss_weight * portfolio_loss
+                + topk_loss_weight * topk_loss
+            )
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             optimizer.step()
             train_losses.append(loss.item())
 
         val_mu, val_log_var, val_y = collect_predictions(model, val_loader, device)
-        val_loss = gaussian_nll(val_mu, val_log_var, val_y).item()
-        print(f"  epoch {epoch:03d} train_nll={np.mean(train_losses):.6f} val_nll={val_loss:.6f}")
+        val_nll = gaussian_nll(val_mu, val_log_var, val_y)
+        val_rank = pairwise_rank_loss(val_mu, val_y, rank_loss_temperature) if rank_loss_weight > 0 else val_mu.new_tensor(0.0)
+        val_listwise = (
+            listwise_rank_loss(val_mu, val_y, listwise_rank_loss_temperature)
+            if listwise_rank_loss_weight > 0
+            else val_mu.new_tensor(0.0)
+        )
+        val_portfolio = (
+            soft_portfolio_loss(val_mu, val_y, portfolio_loss_temperature)
+            if portfolio_loss_weight > 0
+            else val_mu.new_tensor(0.0)
+        )
+        val_topk = (
+            soft_topk_portfolio_loss(val_mu, val_y, top_k=top_k, temperature=topk_loss_temperature)
+            if topk_loss_weight > 0
+            else val_mu.new_tensor(0.0)
+        )
+        val_loss = (
+            val_nll
+            + rank_loss_weight * val_rank
+            + listwise_rank_loss_weight * val_listwise
+            + portfolio_loss_weight * val_portfolio
+            + topk_loss_weight * val_topk
+        )
+        current_score, val_bt = checkpoint_score(
+            checkpoint_metric,
+            val_loss,
+            val_mu,
+            val_log_var,
+            val_y,
+            top_k=top_k,
+            transaction_cost=transaction_cost,
+            rebalance_every=rebalance_every,
+            hold_k=hold_k,
+            min_score=min_score,
+            score_mode=score_mode,
+            risk_aversion=risk_aversion,
+        )
+        print(
+            f"  epoch {epoch:03d} train_loss={np.mean(train_losses):.6f} "
+            f"val_nll={val_nll.item():.6f} val_rank={val_rank.item():.6f} "
+            f"val_listwise={val_listwise.item():.6f} val_portfolio={val_portfolio.item():.6f} "
+            f"val_topk={val_topk.item():.6f} "
+            f"val_loss={val_loss.item():.6f} val_sharpe={val_bt['annualized_sharpe']:.4f} "
+            f"val_return={val_bt['total_net_return']:.4f} "
+            f"val_rank_ic={val_bt.get('rank_ic_by_day', rank_ic_by_day(val_mu, val_y)):.4f}"
+        )
 
-        if val_loss < best_val:
-            best_val = val_loss
+        if current_score > best_score:
+            best_score = current_score
+            best_val_nll = val_nll.item()
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             stale = 0
         else:
@@ -181,7 +553,7 @@ def train_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    return model, best_val
+    return model, best_val_nll
 
 
 def backtest_topk(
@@ -340,7 +712,7 @@ def main() -> None:
         lookback=args.lookback,
         batch_size=args.batch_size,
     )
-    static_adj = build_correlation_graph(data.y_train)
+    static_adj = build_correlation_graph(data.y_train, absolute=args.graph_correlation == "absolute")
     config = StockGraphModelConfig(
         num_stocks=len(data.tickers),
         num_features=len(data.feature_columns),
@@ -372,11 +744,35 @@ def main() -> None:
             patience=args.patience,
             lr=args.lr,
             weight_decay=args.weight_decay,
+            rank_loss_weight=args.rank_loss_weight if model_name in args.rank_loss_models else 0.0,
+            rank_loss_temperature=args.rank_loss_temperature,
+            listwise_rank_loss_weight=(
+                args.listwise_rank_loss_weight if model_name in args.listwise_rank_loss_models else 0.0
+            ),
+            listwise_rank_loss_temperature=args.listwise_rank_loss_temperature,
+            portfolio_loss_weight=args.portfolio_loss_weight if model_name in args.portfolio_loss_models else 0.0,
+            portfolio_loss_temperature=args.portfolio_loss_temperature,
+            topk_loss_weight=args.topk_loss_weight if model_name in args.topk_loss_models else 0.0,
+            topk_loss_temperature=args.topk_loss_temperature,
+            top_k=args.top_k,
+            transaction_cost=args.transaction_cost,
+            rebalance_every=args.rebalance_every,
+            hold_k=None if args.hold_k == 0 else args.hold_k,
+            min_score=args.min_score,
+            score_mode=args.score_mode,
+            risk_aversion=args.risk_aversion,
+            checkpoint_metric=args.checkpoint_metric,
         )
         pred, log_var, true = collect_predictions(model, data.test_loader, device)
-        metrics = compute_metrics(pred, log_var, true)
-        bt_metrics, bt_df = backtest_topk(
+        metrics = compute_metrics(pred, log_var, true, top_k=args.top_k)
+        portfolio_score = score_predictions(
             pred,
+            log_var,
+            score_mode=args.score_mode,
+            risk_aversion=args.risk_aversion,
+        )
+        bt_metrics, bt_df = backtest_topk(
+            portfolio_score,
             true,
             data.test_dates,
             data.tickers,
@@ -395,7 +791,7 @@ def main() -> None:
         if args.turnover_sweep:
             for variant in turnover_sweep_variants(args.top_k):
                 sweep_metrics, sweep_df = backtest_topk(
-                    pred,
+                    portfolio_score,
                     true,
                     data.test_dates,
                     data.tickers,
@@ -415,8 +811,30 @@ def main() -> None:
         save_predictions(output_dir, model_name, pred, log_var, true, data.test_dates, data.tickers)
         print(json.dumps(row, indent=2))
 
-    results_df = pd.DataFrame(all_results).sort_values("rank_ic_by_day", ascending=False)
+    results_df = pd.DataFrame(all_results)
+    results_df["forecast_rank_score"] = (
+        -results_df["nll"] + 0.25 * results_df["rank_ic_by_day"] + 0.05 * results_df["directional_accuracy"]
+    )
+    results_df = results_df.sort_values("forecast_rank_score", ascending=False)
     results_df.to_csv(output_dir / "vn30_model_comparison.csv", index=False)
+    forecast_columns = [
+        "model",
+        "forecast_rank_score",
+        "best_val_nll",
+        "nll",
+        "rmse",
+        "mae",
+        "ic",
+        "rank_ic_by_day",
+        "directional_accuracy",
+        "topk_overlap",
+        "topk_hit_rate",
+        "pred_topk_mean_return",
+        "pred_bottomk_mean_return",
+        "top_bottom_return_spread",
+        "topk_return_capture",
+    ]
+    results_df[forecast_columns].to_csv(output_dir / "vn30_forecast_ranking_summary.csv", index=False)
     pd.DataFrame(backtest_results).to_csv(output_dir / "vn30_backtest_summary.csv", index=False)
     if turnover_sweep_results:
         turnover_sweep_df = pd.DataFrame(turnover_sweep_results)

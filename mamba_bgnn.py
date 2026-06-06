@@ -412,12 +412,12 @@ class Trainer(object):
 
     # ================= logging & csv utils =================
     def _get_logger(self):
-        model_name = self.args['model_name'] + ' ' + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        model_name = self.args['model_name'] + ' ' + datetime.now().strftime("%Y-%m-%d %H_%M_%S")
         logger = logging.getLogger(model_name)
         logger.setLevel(logging.DEBUG)
-        fh = logging.FileHandler(os.path.join(self.args['log_dir'], model_name + '.log'))
+        fh = logging.FileHandler(os.path.join(self.args['log_dir'], model_name + '.log'), encoding='utf-8')
         sh = logging.StreamHandler()
-        fmt = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s', '%Y-%m-%d %H:%M')
+        fmt = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s', '%Y-%m-%d %H_%M')
         sh.setFormatter(fmt)
         logger.addHandler(sh); logger.addHandler(fh)
         return logger
@@ -745,7 +745,7 @@ def main(dataset):
         'early_stop_patience': 20,
         'grad_norm': False,
         'max_grad_norm': 5.0,
-        'log_dir': f'{dataset}_log' + ' ' + datetime.now().strftime("%Y-%m-%d %H:%M:%S") ,
+        'log_dir': f'{dataset}_log' + ' ' + datetime.now().strftime("%Y-%m-%d %H_%M_%S") ,
         'model_name': f'{dataset}_v3',
         'log_step': 20,
     }
