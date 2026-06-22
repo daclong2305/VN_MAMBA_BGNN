@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -18,13 +20,23 @@ from vn30_stock_graph_dataset import build_correlation_graph, build_vn30_panel_l
 DEFAULT_MODELS = [
     "lstm",
     "transformer",
-    "original_mamba_bgnn",
+    "frets",
+    "stockmixer",
+    "agcrn",
+    "fouriergnn",
+    "mambastock",
     "original_mamba_bgnn_full",
-    "stock_mamba_no_graph",
-    "stock_mamba_static",
-    "stock_mamba_adaptive",
     "stock_mamba_hybrid",
 ]
+BASELINE_PROVENANCE_PATH = Path(__file__).with_name("baseline_provenance.json")
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,8 +66,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rank-loss-models",
         nargs="+",
-        default=["stock_mamba_hybrid"],
-        help="Model names that receive the ranking loss term.",
+        default=DEFAULT_MODELS.copy(),
+        help="Model names that receive the ranking loss term. Defaults to every final-comparison model.",
     )
     parser.add_argument(
         "--portfolio-loss-weight",
@@ -72,7 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--portfolio-loss-models",
         nargs="+",
-        default=["stock_mamba_hybrid"],
+        default=DEFAULT_MODELS.copy(),
         help="Model names that receive the soft portfolio loss term.",
     )
     parser.add_argument(
@@ -90,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--topk-loss-models",
         nargs="+",
-        default=["stock_mamba_hybrid"],
+        default=DEFAULT_MODELS.copy(),
         help="Model names that receive the differentiable top-k portfolio loss.",
     )
     parser.add_argument(
@@ -108,8 +120,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--listwise-rank-loss-models",
         nargs="+",
-        default=["stock_mamba_hybrid"],
-        help="Model names that receive the listwise ranking loss term.",
+        default=DEFAULT_MODELS.copy(),
+        help="Model names that receive the listwise ranking loss term. Defaults to every final-comparison model.",
     )
     parser.add_argument(
         "--checkpoint-metric",
@@ -446,17 +458,26 @@ def train_model(
     score_mode: str = "mu",
     risk_aversion: float = 0.25,
     checkpoint_metric: str = "loss",
-) -> tuple[nn.Module, float]:
+) -> tuple[nn.Module, float, dict[str, float]]:
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # The MAMBA-BGNN experiment protocol reports Adam; use it for every model.
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     best_state = None
     best_score = -float("inf")
     best_val_nll = float("inf")
     stale = 0
+    epoch = 0
+    train_epoch_times = []
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    fit_started = time.perf_counter()
 
     for epoch in range(1, epochs + 1):
         model.train()
         train_losses = []
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        train_epoch_started = time.perf_counter()
         for x, y in train_loader:
             x = x.to(device)
             y = y.to(device)
@@ -490,6 +511,9 @@ def train_model(
             nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             optimizer.step()
             train_losses.append(loss.item())
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        train_epoch_times.append(time.perf_counter() - train_epoch_started)
 
         val_mu, val_log_var, val_y = collect_predictions(model, val_loader, device)
         val_nll = gaussian_nll(val_mu, val_log_var, val_y)
@@ -553,7 +577,17 @@ def train_model(
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    return model, best_val_nll
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    fit_wall_time_sec = time.perf_counter() - fit_started
+    training_time_sec = float(np.sum(train_epoch_times))
+    training_stats = {
+        "epochs_ran": epoch,
+        "training_time_sec": training_time_sec,
+        "training_time_sec_per_epoch": training_time_sec / max(len(train_epoch_times), 1),
+        "fit_wall_time_sec": fit_wall_time_sec,
+    }
+    return model, best_val_nll, training_stats
 
 
 def backtest_topk(
@@ -735,7 +769,8 @@ def main() -> None:
     for model_name in args.models:
         print(f"\n=== Training {model_name} ===")
         model = create_model(model_name, config, static_adjacency=static_adj)
-        model, best_val = train_model(
+        num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        model, best_val, training_stats = train_model(
             model,
             data.train_loader,
             data.val_loader,
@@ -782,7 +817,14 @@ def main() -> None:
             hold_k=None if args.hold_k == 0 else args.hold_k,
             min_score=args.min_score,
         )
-        row = {"model": model_name, "best_val_nll": best_val, **metrics, **bt_metrics}
+        row = {
+            "model": model_name,
+            "num_parameters": num_parameters,
+            **training_stats,
+            "best_val_nll": best_val,
+            **metrics,
+            **bt_metrics,
+        }
         all_results.append(row)
         backtest_results.append({"model": model_name, **bt_metrics})
         bt_suffix = f"top{args.top_k}_reb{args.rebalance_every}_hold{args.hold_k}"
@@ -810,6 +852,27 @@ def main() -> None:
                 )
         save_predictions(output_dir, model_name, pred, log_var, true, data.test_dates, data.tickers)
         print(json.dumps(row, indent=2))
+        model.to("cpu")
+        torch.save(
+            {
+                "model_name": model_name,
+                "model_state_dict": model.state_dict(),
+                "model_config": {
+                    "num_stocks": config.num_stocks,
+                    "num_features": config.num_features,
+                    "lookback": config.lookback,
+                    "hidden_dim": config.hidden_dim,
+                    "dropout": config.dropout,
+                },
+                "num_parameters": num_parameters,
+                "best_validation_score": best_val,
+                "training_stats": training_stats,
+            },
+            output_dir / f"{model_name}_best.pt",
+        )
+        del model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     results_df = pd.DataFrame(all_results)
     results_df["forecast_rank_score"] = (
@@ -819,6 +882,11 @@ def main() -> None:
     results_df.to_csv(output_dir / "vn30_model_comparison.csv", index=False)
     forecast_columns = [
         "model",
+        "num_parameters",
+        "epochs_ran",
+        "training_time_sec",
+        "training_time_sec_per_epoch",
+        "fit_wall_time_sec",
         "forecast_rank_score",
         "best_val_nll",
         "nll",
@@ -840,8 +908,13 @@ def main() -> None:
         turnover_sweep_df = pd.DataFrame(turnover_sweep_results)
         turnover_sweep_df.to_csv(output_dir / "vn30_turnover_sweep.csv", index=False)
 
+    baseline_provenance = json.loads(BASELINE_PROVENANCE_PATH.read_text(encoding="utf-8"))
     experiment_config = {
         "args": vars(args),
+        "data_artifacts": {
+            "panel_sha256": sha256_file(args.panel_path),
+            "metadata_sha256": sha256_file(args.metadata_path),
+        },
         "tickers": data.tickers,
         "feature_columns": data.feature_columns,
         "train_period": [data.train_dates[0], data.train_dates[-1]],
@@ -855,6 +928,7 @@ def main() -> None:
             "x_test": list(data.x_test.shape),
             "y_test": list(data.y_test.shape),
         },
+        "baseline_provenance": baseline_provenance,
     }
     (output_dir / "experiment_config.json").write_text(json.dumps(experiment_config, indent=2), encoding="utf-8")
     print("\n=== Summary ===")

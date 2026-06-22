@@ -1,0 +1,77 @@
+{
+  "checked_on": "2026-06-22",
+  "scope": "Independent official-code adaptation for the VN30 panel; not an exact reproduction of Table 1 in the MAMBA-BGNN paper.",
+  "common_adapter": {
+    "input": "(batch, lookback, stocks, features)",
+    "output": "(mu, log_var), each (batch, stocks)",
+    "deterministic_uncertainty": "One trainable homoscedastic log-variance scalar shared by all samples and stocks.",
+    "training_protocol": "Shared VN30 loader, chronological split, train-only scaler, target, optimizer budget and validation selection."
+  },
+  "models": {
+    "frets": {
+      "status": "official_core_port_with_vn30_adapter",
+      "repository": "https://github.com/aikunyi/FreTS",
+      "commit": "6de28ab19f83955087e2690cdfbb29b065ab0b9c",
+      "upstream_file": "models/FreTS.py",
+      "upstream_file_sha256": "91200D7AC20B26D770F1DAA943449914C8DA771017E2BEC8ADA66C9A706438C3",
+      "license": "Apache-2.0",
+      "vn30_adaptation": "A shared Linear(features,1) forms one signal per stock; stocks are FreTS channels; pred_len=1; output is one return per stock.",
+      "official_defaults_kept": "embed_size=128, hidden_size=256, sparsity_threshold=0.01, channel and temporal frequency learners."
+    },
+    "stockmixer": {
+      "status": "clean_room_reimplementation_with_batch_adapter",
+      "repository": "https://github.com/SJTU-DMTai/StockMixer",
+      "commit": "cce13598afd3ff33ae317700a85ae08db0554652",
+      "upstream_file": "src/model.py",
+      "upstream_file_sha256": "DA731CE33B837DF5E0542F411D24ED7F4DA499EA2B806B1D19FC69034E6F3144",
+      "license": "No repository license found on 2026-06-22; architecture was independently reimplemented, not copied.",
+      "vn30_adaptation": "Adds a batch dimension; stocks retain the upstream stock-mixing semantics; the stride-2 scale length is derived from lookback so lookback=20 is valid.",
+      "official_defaults_kept": "TriU causal temporal projection, full/coarse temporal scales, indicator mixer, stock mixer hidden size 20, direct plus cross-stock readouts."
+    },
+    "agcrn": {
+      "status": "official_core_port_with_vn30_adapter",
+      "repository": "https://github.com/LeiBAI/AGCRN",
+      "commit": "7fbbf2aeb099242098a3cf482b55cd45d7295c28",
+      "upstream_files": {
+        "model/AGCN.py": "F9C74005A118E6C8F4189A23DE5A2598DE01A1DED002A0EDE387D15DC021E77D",
+        "model/AGCRNCell.py": "65ADE82A8DC5765C62C0D527B3EB7509A59A1DEFCAF348766D856C00B8789128",
+        "model/AGCRN.py": "40B6A1EF84CF0510250D0CEDCD1D253E116869803CD7B8BE0973733148936A80"
+      },
+      "license": "MIT",
+      "vn30_adaptation": "VN30 stocks are graph nodes and the 17 indicators are node features; horizon=1 and output_dim=1.",
+      "official_defaults_kept": "hidden_dim=64, num_layers=2, embed_dim=10, cheb_k=2, adaptive support and node-adaptive weight pools."
+    },
+    "fouriergnn": {
+      "status": "official_core_port_with_vn30_adapter",
+      "repository": "https://github.com/aikunyi/FourierGNN",
+      "commit": "f239290b6f6881c53c5dda094bb0a7255eb0ea2d",
+      "upstream_file": "model/FourierGNN.py",
+      "upstream_file_sha256": "A0B4864AE538CE6738761F1286B03F6D41CE124C25564F6896998DEA5585F899",
+      "license": "MIT",
+      "vn30_adaptation": "A shared Linear(features,1) forms one signal per stock; stocks are FourierGNN nodes; the upstream hard-coded cuda:0 move is removed.",
+      "official_defaults_kept": "embed_size=128, hidden_size=256, projection_width=8, three complex Fourier graph layers and soft shrinkage."
+    },
+    "mambastock": {
+      "status": "clean_room_reimplementation_with_window_adapter",
+      "repository": "https://github.com/zshicode/MambaStock",
+      "commit": "ff0b16cb3e57dfa66c6955e7c2b80eaf64058f83",
+      "upstream_file": "mamba.py",
+      "upstream_file_sha256": "9BE202964115E874FB2517DC2E763063510BD95DB8D5B88A5E6A41EF89644CB5",
+      "license": "No repository license found on 2026-06-22; architecture was independently reimplemented, not copied.",
+      "vn30_adaptation": "The same temporal model is shared over stocks and predicts from the final position of each lookback window; no stock graph is added.",
+      "official_defaults_kept": "hidden_dim=16, two Mamba layers, d_state=16, expand_factor=2, d_conv=4, RMSNorm and Tanh output."
+    },
+    "lstm": {
+      "status": "local_adapted_control",
+      "repository": null,
+      "license": "Project license",
+      "vn30_adaptation": "One shared two-layer LSTM is applied independently to each stock."
+    },
+    "transformer": {
+      "status": "local_adapted_control",
+      "repository": null,
+      "license": "Project license",
+      "vn30_adaptation": "One shared two-layer temporal Transformer is applied independently to each stock."
+    }
+  }
+}
