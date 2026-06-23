@@ -94,10 +94,13 @@ It also reports top-k ranking metrics:
 
 - `topk_overlap`: overlap between predicted top-k and realized top-k stocks.
 - `topk_hit_rate`: fraction of days where predicted top-k contains at least one realized top-k stock.
-- `pred_topk_mean_return`: realized mean return of predicted top-k stocks.
-- `pred_bottomk_mean_return`: realized mean return of predicted bottom-k stocks.
-- `top_bottom_return_spread`: realized return spread between predicted top-k and bottom-k groups.
+- `pred_topk_mean_return`: realized arithmetic mean return of predicted top-k stocks. The target is a log return, so the evaluator converts it with `expm1(log_return)`.
+- `pred_bottomk_mean_return`: realized arithmetic mean return of predicted bottom-k stocks.
+- `top_bottom_return_spread`: realized arithmetic return spread between predicted top-k and bottom-k groups.
 - `topk_return_capture`: predicted top-k return divided by oracle top-k return.
+
+Backtest metrics such as `total_net_return`, `annualized_sharpe`, and `max_drawdown`
+also use arithmetic returns converted from the log-return target before compounding.
 
 The main output file for this setting is:
 

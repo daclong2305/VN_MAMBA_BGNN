@@ -189,6 +189,11 @@ def gaussian_nll(mu: torch.Tensor, log_var: torch.Tensor, y: torch.Tensor) -> to
     return nn.functional.gaussian_nll_loss(mu, y, log_var.exp().clamp_min(1e-8), full=True, reduction="mean")
 
 
+def log_returns_to_arithmetic(log_returns: torch.Tensor) -> torch.Tensor:
+    """Convert log returns to arithmetic returns for economic/portfolio metrics."""
+    return torch.expm1(log_returns)
+
+
 def pairwise_rank_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0.01) -> torch.Tensor:
     pred_diff = (mu.unsqueeze(2) - mu.unsqueeze(1)) / max(temperature, 1e-8)
     true_diff = y.unsqueeze(2) - y.unsqueeze(1)
@@ -210,7 +215,8 @@ def listwise_rank_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0
 def soft_portfolio_loss(mu: torch.Tensor, y: torch.Tensor, temperature: float = 0.02) -> torch.Tensor:
     scores = mu - mu.mean(dim=1, keepdim=True)
     weights = F.softmax(scores / max(temperature, 1e-8), dim=1)
-    excess_returns = y - y.mean(dim=1, keepdim=True)
+    arithmetic_returns = log_returns_to_arithmetic(y)
+    excess_returns = arithmetic_returns - arithmetic_returns.mean(dim=1, keepdim=True)
     return -(weights * excess_returns).sum(dim=1).mean()
 
 
@@ -240,8 +246,9 @@ def soft_topk_portfolio_loss(
     downside_weight: float = 0.25,
 ) -> torch.Tensor:
     weights = soft_topk_weights(mu, top_k=top_k, temperature=temperature)
-    portfolio_returns = (weights * y).sum(dim=1)
-    benchmark_returns = y.mean(dim=1)
+    arithmetic_returns = log_returns_to_arithmetic(y)
+    portfolio_returns = (weights * arithmetic_returns).sum(dim=1)
+    benchmark_returns = arithmetic_returns.mean(dim=1)
     excess_returns = portfolio_returns - benchmark_returns
     mean_excess = excess_returns.mean()
     sharpe = mean_excess / excess_returns.std(unbiased=False).clamp_min(1e-4)
@@ -272,6 +279,7 @@ def rank_ic_by_day(mu: torch.Tensor, y: torch.Tensor) -> float:
 
 
 def topk_ranking_metrics(mu: torch.Tensor, y: torch.Tensor, top_k: int = 5) -> dict[str, float]:
+    """Ranking metrics on log-return targets, with economic returns reported as arithmetic returns."""
     if top_k <= 0:
         raise ValueError("top_k must be positive")
     k = min(top_k, mu.shape[1])
@@ -281,6 +289,7 @@ def topk_ranking_metrics(mu: torch.Tensor, y: torch.Tensor, top_k: int = 5) -> d
     bottom_returns = []
     oracle_top_returns = []
     for pred_day, true_day in zip(mu, y):
+        true_day_arithmetic = log_returns_to_arithmetic(true_day)
         pred_order = torch.argsort(pred_day, descending=True)
         true_order = torch.argsort(true_day, descending=True)
         pred_top = pred_order[:k]
@@ -289,9 +298,9 @@ def topk_ranking_metrics(mu: torch.Tensor, y: torch.Tensor, top_k: int = 5) -> d
         overlap = sum(1 for idx in pred_top.tolist() if idx in true_top)
         overlaps.append(overlap / float(k))
         hit_rates.append(float(overlap > 0))
-        top_returns.append(true_day[pred_top].mean().item())
-        bottom_returns.append(true_day[pred_bottom].mean().item())
-        oracle_top_returns.append(true_day[true_order[:k]].mean().item())
+        top_returns.append(true_day_arithmetic[pred_top].mean().item())
+        bottom_returns.append(true_day_arithmetic[pred_bottom].mean().item())
+        oracle_top_returns.append(true_day_arithmetic[true_order[:k]].mean().item())
     top_return = float(np.mean(top_returns)) if top_returns else 0.0
     bottom_return = float(np.mean(bottom_returns)) if bottom_returns else 0.0
     oracle_top_return = float(np.mean(oracle_top_returns)) if oracle_top_returns else 0.0
@@ -601,6 +610,12 @@ def backtest_topk(
     hold_k: int | None = None,
     min_score: float | None = None,
 ) -> tuple[dict[str, float], pd.DataFrame]:
+    """Backtest a top-k portfolio.
+
+    ``true_returns`` are the dataset's next-day log returns. They are converted to
+    arithmetic returns before computing portfolio P&L, trading-cost-adjusted net
+    returns, cumulative return, Sharpe, and drawdown.
+    """
     if top_k <= 0:
         raise ValueError("top_k must be positive")
     if rebalance_every <= 0:
@@ -609,7 +624,7 @@ def backtest_topk(
         raise ValueError("hold_k must be >= top_k when provided")
 
     pred_np = pred.detach().cpu().numpy()
-    ret_np = true_returns.detach().cpu().numpy()
+    ret_np = np.expm1(true_returns.detach().cpu().numpy())
     prev_weights = np.zeros(pred_np.shape[1], dtype=np.float32)
     current_holdings: list[int] = []
     rows = []

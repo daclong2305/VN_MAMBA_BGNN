@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from run_vn30_stock_graph_experiment import (
+    backtest_topk,
     listwise_rank_loss,
     score_predictions,
     soft_topk_portfolio_loss,
@@ -56,6 +57,34 @@ def test_topk_ranking_metrics_are_bounded():
     assert 0.0 <= metrics["topk_overlap"] <= 1.0
     assert 0.0 <= metrics["topk_hit_rate"] <= 1.0
     assert metrics["top_bottom_return_spread"] > 0.0
+
+
+def test_topk_return_metrics_convert_log_returns_to_arithmetic():
+    mu = torch.tensor([[0.2, -0.1]])
+    y = torch.log1p(torch.tensor([[0.10, -0.05]]))
+    metrics = topk_ranking_metrics(mu, y, top_k=1)
+
+    assert torch.isclose(torch.tensor(metrics["pred_topk_mean_return"]), torch.tensor(0.10), atol=1e-6)
+    assert torch.isclose(torch.tensor(metrics["pred_bottomk_mean_return"]), torch.tensor(-0.05), atol=1e-6)
+    assert torch.isclose(torch.tensor(metrics["top_bottom_return_spread"]), torch.tensor(0.15), atol=1e-6)
+
+
+def test_backtest_topk_converts_log_returns_to_arithmetic_before_compounding():
+    pred = torch.tensor([[0.2, -0.1], [0.3, 0.0]])
+    true = torch.log1p(torch.tensor([[0.10, 0.00], [0.10, 0.00]]))
+
+    metrics, daily = backtest_topk(
+        pred,
+        true,
+        dates=["d1", "d2"],
+        tickers=["A", "B"],
+        top_k=1,
+        transaction_cost=0.0,
+        rebalance_every=1,
+    )
+
+    assert abs(daily.loc[0, "gross_return"] - 0.10) < 1e-6
+    assert abs(metrics["total_net_return"] - 0.21) < 1e-6
 
 
 def test_score_predictions_modes_keep_shape():
