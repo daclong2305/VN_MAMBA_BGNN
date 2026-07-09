@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mamba_bgnn import MAMBA_BayesMAGAC, ModelArgs
+from vn30_baseline_models import PANEL_BASELINE_NAMES, create_panel_baseline
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class PerStockLSTM(nn.Module):
             dropout=config.dropout if num_layers > 1 else 0.0,
         )
         self.mean_head = nn.Linear(config.hidden_dim, 1)
-        self.logvar_head = nn.Linear(config.hidden_dim, 1)
+        self.log_var = nn.Parameter(torch.tensor(-7.0))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, l, s, f = x.shape
@@ -41,8 +42,7 @@ class PerStockLSTM(nn.Module):
         out, _ = self.lstm(stock_seq)
         last = out[:, -1]
         mu = self.mean_head(last).view(b, s)
-        log_var = self.logvar_head(last).view(b, s).clamp(-10.0, 5.0)
-        return mu, log_var
+        return mu, self.log_var.clamp(-10.0, 5.0).expand_as(mu)
 
 
 class PositionalEncoding(nn.Module):
@@ -76,7 +76,7 @@ class PerStockTransformer(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
         self.mean_head = nn.Linear(config.hidden_dim, 1)
-        self.logvar_head = nn.Linear(config.hidden_dim, 1)
+        self.log_var = nn.Parameter(torch.tensor(-7.0))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, l, s, f = x.shape
@@ -84,8 +84,7 @@ class PerStockTransformer(nn.Module):
         h = self.pos(self.input_proj(stock_seq))
         h = self.encoder(h)[:, -1]
         mu = self.mean_head(h).view(b, s)
-        log_var = self.logvar_head(h).view(b, s).clamp(-10.0, 5.0)
-        return mu, log_var
+        return mu, self.log_var.clamp(-10.0, 5.0).expand_as(mu)
 
 
 class OriginalMambaBGNNPerStock(nn.Module):
@@ -370,12 +369,13 @@ def create_model(
     static_adjacency: torch.Tensor | None = None,
 ) -> nn.Module:
     name = name.lower()
+    canonical_name = name.replace("_", "").replace("-", "")
     if name == "lstm":
         return PerStockLSTM(config)
     if name == "transformer":
         return PerStockTransformer(config)
-    if name == "original_mamba_bgnn":
-        return OriginalMambaBGNNPerStock(config)
+    if canonical_name in PANEL_BASELINE_NAMES:
+        return create_panel_baseline(name, config)
     if name == "original_mamba_bgnn_full":
         return OriginalMambaBGNNFullPerStock(config)
     if name == "stock_mamba_no_graph":

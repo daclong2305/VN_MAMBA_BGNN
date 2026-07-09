@@ -1,13 +1,27 @@
 import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 from run_vn30_stock_graph_experiment import (
+    backtest_topk,
     listwise_rank_loss,
     score_predictions,
     soft_topk_portfolio_loss,
     soft_topk_weights,
     topk_ranking_metrics,
+    train_model,
     validation_portfolio_metrics,
 )
+
+
+class TinyPanelModel(nn.Module):
+    def __init__(self, num_features: int):
+        super().__init__()
+        self.head = nn.Linear(num_features, 2)
+
+    def forward(self, x: torch.Tensor):
+        out = self.head(x[:, -1])
+        return out[..., 0], out[..., 1].clamp(-10.0, 5.0)
 
 
 def test_soft_topk_weights_are_valid_probabilities():
@@ -43,6 +57,34 @@ def test_topk_ranking_metrics_are_bounded():
     assert 0.0 <= metrics["topk_overlap"] <= 1.0
     assert 0.0 <= metrics["topk_hit_rate"] <= 1.0
     assert metrics["top_bottom_return_spread"] > 0.0
+
+
+def test_topk_return_metrics_convert_log_returns_to_arithmetic():
+    mu = torch.tensor([[0.2, -0.1]])
+    y = torch.log1p(torch.tensor([[0.10, -0.05]]))
+    metrics = topk_ranking_metrics(mu, y, top_k=1)
+
+    assert torch.isclose(torch.tensor(metrics["pred_topk_mean_return"]), torch.tensor(0.10), atol=1e-6)
+    assert torch.isclose(torch.tensor(metrics["pred_bottomk_mean_return"]), torch.tensor(-0.05), atol=1e-6)
+    assert torch.isclose(torch.tensor(metrics["top_bottom_return_spread"]), torch.tensor(0.15), atol=1e-6)
+
+
+def test_backtest_topk_converts_log_returns_to_arithmetic_before_compounding():
+    pred = torch.tensor([[0.2, -0.1], [0.3, 0.0]])
+    true = torch.log1p(torch.tensor([[0.10, 0.00], [0.10, 0.00]]))
+
+    metrics, daily = backtest_topk(
+        pred,
+        true,
+        dates=["d1", "d2"],
+        tickers=["A", "B"],
+        top_k=1,
+        transaction_cost=0.0,
+        rebalance_every=1,
+    )
+
+    assert abs(daily.loc[0, "gross_return"] - 0.10) < 1e-6
+    assert abs(metrics["total_net_return"] - 0.21) < 1e-6
 
 
 def test_score_predictions_modes_keep_shape():
@@ -87,3 +129,29 @@ def test_validation_portfolio_metrics_smoke():
 
     assert metrics["positive_day_ratio"] >= 0.0
     assert metrics["average_turnover"] > 0.0
+
+
+def test_train_model_returns_efficiency_statistics():
+    x = torch.randn(8, 3, 4, 2)
+    y = torch.randn(8, 4) * 0.01
+    loader = DataLoader(TensorDataset(x, y), batch_size=4, shuffle=False)
+    model, best_val_nll, stats = train_model(
+        TinyPanelModel(num_features=2),
+        loader,
+        loader,
+        torch.device("cpu"),
+        epochs=1,
+        patience=1,
+        lr=1e-3,
+        weight_decay=1e-5,
+        rank_loss_weight=0.05,
+        listwise_rank_loss_weight=0.05,
+        top_k=2,
+        checkpoint_metric="loss",
+    )
+    assert isinstance(model, nn.Module)
+    assert torch.isfinite(torch.tensor(best_val_nll))
+    assert stats["epochs_ran"] == 1
+    assert stats["training_time_sec"] >= 0
+    assert stats["training_time_sec_per_epoch"] >= 0
+    assert stats["fit_wall_time_sec"] >= stats["training_time_sec"]
